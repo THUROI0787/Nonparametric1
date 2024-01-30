@@ -1,0 +1,236 @@
+import pandas as pd
+import numpy as np
+import scipy
+import statsmodels.api as sm
+import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy.stats import wilcoxon
+from scipy.stats import ranksums
+
+# 处理选票数据，只保留民主党和共和党的投票数，以及两者比例，双主键
+votes = pd.read_csv('dataset/2020_election/president_county_candidate.csv',index_col=[0,1])
+DEM = votes[votes['party']=='DEM']['votes'].rename('dem')
+REP = votes[votes['party']=='REP']['votes'].rename('rep')  # 共和党（Trump）
+votes = pd.concat([DEM,REP],axis=1)
+votes['ratio'] = votes.dem/votes.rep
+
+# 参考列名索引
+
+# 处理democratic文件，三方面元素信息：人口，年龄(占比)，性别(占比)，种族(占比)，以及年龄与性别交叉项(占比)
+rename_dict ={
+    "DP05_0001PE" : "population",
+    "DP05_0002PE" : "males",  
+    "DP05_0025PE" : "over_18",
+    "DP05_0026PE" : "over_18_male",
+    "DP05_0029PE" : "over_65",
+    "DP05_0030PE" : "over_65_male",
+    "DP05_0034PE" : "main_race",
+    "DP05_0037PE" : "white",
+    "DP05_0038PE" : "black",
+    "DP05_0039PE" : "a_indian_alaska",
+    "DP05_0044PE" : "asian",
+    "DP05_0052PE" : "hawaiian_pacific"
+}
+
+rename_dict2 ={
+    "DP03_0009PE" : "unemployed",
+    "DP03_0052PE" : "low_income",
+    "DP03_0061PE" : "high_income",
+    "DP03_0062E" : "median_income",
+    "DP03_0063E" : "mean_income"
+}
+
+demo = pd.read_csv('dataset/ACSDP1Y2019.DP05-Data.csv',index_col=1)
+demo = demo[rename_dict.keys()].rename(columns=rename_dict)
+demo.drop(index='Geographic Area Name',inplace=True)
+demo.reset_index(inplace=True)
+demo['county'] = demo.NAME.apply(lambda x: x.split(', ')[0])
+demo['state'] = demo.NAME.apply(lambda x: x.split(', ')[1])
+demo.set_index(['state','county'],inplace=True)
+
+demo2 = pd.read_csv('dataset/ACSDP1Y2019.DP03-Data.csv',index_col=1)
+demo2 = demo2[rename_dict2.keys()].rename(columns=rename_dict2)
+demo2.drop(index='Geographic Area Name',inplace=True)
+demo2.reset_index(inplace=True)
+demo2['county'] = demo2.NAME.apply(lambda x: x.split(', ')[0])
+demo2['state'] = demo2.NAME.apply(lambda x: x.split(', ')[1])
+demo2.set_index(['state','county'],inplace=True)
+
+# 数据集合并，处理缺失值
+demo3 = pd.concat([demo, demo2], axis=1)
+df = demo3.join(votes).dropna()
+df = df.replace('N',np.NaN).dropna().drop(['NAME'],axis=1)
+df = df.astype(float)
+#df.apply(lambda x:)
+df['mid_age'] = 100*(df['over_18']-df['over_65'])/df['population']
+df['old'] = 100*df['over_65']/df['population']
+df['won'] = df['ratio'].apply(lambda x: 0 if x< 1 else 1)
+
+# 地域条件（几个典型州）：Texas(REP), California(DEM), Florida(摇摆)
+Tex = df.loc['Texas']
+Cali = df.loc['California']
+Flor = df.loc['Florida']
+
+# 根据投票倾向性进行条件
+dem = df[df['ratio']>1]
+rep = df[df['ratio']<=1]
+bil = df[(df['ratio']>2.5) | (df['ratio']<0.4)]
+mid = df[(df['ratio']<1.15) & (df['ratio']>0.85)]
+df
+
+# 密度图
+sns.kdeplot(data=df, x='ratio')
+plt.xlabel('ratio')
+plt.ylabel('Density')
+plt.title('Density Plot of ratio')
+plt.show()
+
+# QQ图
+sm.qqplot(df['ratio'], line='s')
+plt.xlabel('Theoretical Quantiles')
+plt.ylabel('Sample Quantiles')
+plt.title('QQ Plot of ratio')
+plt.show()
+
+sns.kdeplot(data=df, x='median_income')
+plt.xlabel('median_income')
+plt.ylabel('Density')
+plt.title('Density Plot of log(ratio)')
+plt.show()
+
+sm.qqplot((df['median_income']), line='s')
+plt.xlabel('Theoretical Quantiles')
+plt.ylabel('Sample Quantiles')
+plt.title('QQ Plot of ratio')
+plt.show()
+
+variables = ['males', 'mid_age', 'old', 'white', 'black', 'asian', 'unemployed', 'low_income', 'high_income']
+
+fig, axes = plt.subplots(3, 3, figsize=(12, 12))
+
+for i, variable in enumerate(variables):
+    row = i // 3
+    col = i % 3
+    sns.kdeplot(data=df, x=variable, ax=axes[row, col])
+    axes[row, col].set_xlabel(variable)
+    axes[row, col].set_ylabel('Density')
+    axes[row, col].set_title(f'Density Plot of {variable}')
+
+plt.tight_layout()
+plt.show()
+
+# 计算相关系数矩阵
+correlation_matrix = df[['ratio', 'males', 'mid_age', 'old', 'white', 'black', 'asian','unemployed', 'low_income','high_income']].corr()
+
+# 绘制热力图
+sns.heatmap(correlation_matrix, annot=True, cmap='coolwarm')
+plt.title('Correlation Matrix')
+plt.show()
+
+endog = df['won']
+exog = df[['males','mid_age','old','white','black','asian']]
+exog = sm.add_constant(exog)
+fit = sm.GLM(endog,exog,family=sm.families.Binomial()).fit()
+fit.summary()
+
+# Model: GLM，ratio ~ males + old + mid_age + white + asian, logit
+# 在Tex进行GLM
+endog = Tex['won']
+exog = Tex[['males','mid_age','old','white','black','asian']]
+exog = sm.add_constant(exog)
+fit = sm.GLM(endog,exog,family=sm.families.Binomial()).fit()
+# fit = sm.GLM(endog,exog).fit()
+fit.summary()
+
+# 在Cali进行GLM
+endog = Cali['won']
+exog = Cali[['males','mid_age','old','white','black','asian']]
+exog = sm.add_constant(exog)
+fit = sm.GLM(endog,exog,family=sm.families.Binomial()).fit()
+# fit = sm.GLM(endog,exog).fit()
+fit.summary()
+
+# 在Flor进行GLM
+endog = Flor['won']
+exog = Flor[['males','mid_age','old','white','black','asian']]
+exog = sm.add_constant(exog)
+fit = sm.GLM(endog,exog,family=sm.families.Binomial()).fit()
+# fit = sm.GLM(endog,exog).fit()
+fit.summary()
+
+# 在bil进行正态GLM人口因素，此时表示投票较为保守/稳定的county
+endog = bil['ratio']
+exog = bil[['males','mid_age','old','white','black','asian']]
+exog = sm.add_constant(exog)
+# fit = sm.GLM(endog,exog,family=sm.families.Binomial()).fit()
+fit = sm.GLM(endog,exog).fit()
+fit.summary()
+
+# 在mid进行正态GLM人口因素，此时表示投票较为摇摆的county
+endog = mid['ratio']
+exog = mid[['males','mid_age','old','white','black','asian']]
+exog = sm.add_constant(exog)
+# fit = sm.GLM(endog,exog,family=sm.families.Binomial()).fit()
+fit = sm.GLM(endog,exog).fit()
+fit.summary()
+
+# 在bil进行正态GLM经济因素，此时表示投票较为保守/稳定的county
+endog = bil['ratio']
+exog = bil[['unemployed', 'low_income','high_income','median_income','mean_income']]
+exog = sm.add_constant(exog)
+# fit = sm.GLM(endog,exog,family=sm.families.Binomial()).fit()
+fit = sm.GLM(endog,exog).fit()
+fit.summary()
+
+# 在mid进行正态GLM经济因素，此时表示投票较为摇摆的county
+endog = mid['ratio']
+exog = mid[['unemployed', 'low_income','high_income','median_income','mean_income']]
+exog = sm.add_constant(exog)
+# fit = sm.GLM(endog,exog,family=sm.families.Binomial()).fit()
+fit = sm.GLM(endog,exog).fit()
+fit.summary()
+
+# 综合所有变量
+endog = df['won']
+exog = df[['males','mid_age','old','white','black','asian','unemployed', 'low_income','high_income','median_income','mean_income']]
+exog.loc[:, 'median_income'] = np.log(exog['median_income'])
+exog.loc[:, 'mean_income'] = np.log(exog['mean_income'])
+exog = sm.add_constant(exog)
+# fit = sm.GLM(endog,exog,family=sm.families.Binomial()).fit()
+fit = sm.Logit(endog,exog).fit()
+fit.summary()
+
+# 根据 ratio 从高到低排序
+df_sorted = df.sort_values(by='ratio', ascending=False)
+
+# 将 df_sorted 分为两个样本
+mid = len(df_sorted) // 3
+high = df_sorted[:mid]
+low = df_sorted[len(df_sorted)-mid:len(df_sorted)]
+
+# 进行 Wilcoxon 秩和检验
+variables = ['old', 'unemployed', 'median_income']
+
+for variable in variables:
+    statistic, p_value = wilcoxon(high[variable], low[variable])
+    print(f"Variable: {variable}")
+    print(f"Wilcoxon statistic: {statistic}")
+    print(f"P-value: {p_value}")
+    print("------------------------")
+
+from scipy.stats import ranksums
+
+# 进行单侧检验
+variables = ['old', 'unemployed', 'median_income']
+alpha = 0.05  # 设置显著性水平
+
+for variable in variables:
+    statistic, p_value = wilcoxon(high[variable], low[variable], alternative='less')
+    print(f"Variable: {variable}")
+    print(f"Wilcoxon statistic: {statistic}")
+    print(f"P-value: {p_value}")
+
+    if p_value < alpha:
+        print("影响是正向的")
+    else:
+        print("影响是负向的")
